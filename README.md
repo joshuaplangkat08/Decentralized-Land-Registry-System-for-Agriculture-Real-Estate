@@ -55,3 +55,41 @@ A blockchain-based land registry system built on Stacks, enabling transparent an
 - Document attachment capability
 ```
 
+Git Commit Message:
+```
+feat: implement decentralized land registry system with ownership tracking and transfer capabilities
+```
+
+PR Title:
+```
+🏗️ Add Land Registry Smart Contract MVP
+```
+
+PR Description:
+```
+## Overview
+This PR introduces a decentralized land registry system smart contract that enables:
+- Secure land registration with coordinate tracking
+- Transparent ownership transfers
+- Complete transaction history
+- Administrative controls for land management
+
+## Added Features
+- Land registration with coordinate system
+- Ownership transfer mechanism
+- Historical transaction tracking
+- Status management system
+- Administrative controls
+- Read-only query functions
+
+## Testing
+- Contract successfully deployed and tested on local Clarinet environment
+- All core functions verified with multiple test scenarios
+- Error handling confirmed for edge cases
+
+## Next Steps
+- Add additional validation layers
+- Implement more detailed reporting
+- Add support for land subdivisions
+
+
