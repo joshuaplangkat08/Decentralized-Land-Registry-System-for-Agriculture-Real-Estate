@@ -398,3 +398,385 @@
 (define-read-only (get-dispute-count)
   (ok (var-get dispute-counter))
 )
+(define-constant ERR-LEASE-EXISTS (err u111))
+(define-constant ERR-LEASE-NOT-FOUND (err u112))
+(define-constant ERR-LEASE-EXPIRED (err u113))
+(define-constant ERR-INSUFFICIENT-PAYMENT (err u114))
+(define-constant ERR-LEASE-NOT-ACTIVE (err u115))
+
+(define-map land-leases
+  { lease-id: uint }
+  {
+    land-id: uint,
+    landlord: principal,
+    tenant: principal,
+    monthly-rent: uint,
+    security-deposit: uint,
+    lease-start: uint,
+    lease-end: uint,
+    payment-due-date: uint,
+    last-payment-date: uint,
+    status: (string-ascii 15),
+    lease-purpose: (string-ascii 30),
+  }
+)
+
+(define-map lease-payments
+  {
+    lease-id: uint,
+    payment-id: uint,
+  }
+  {
+    amount: uint,
+    payment-date: uint,
+    payment-type: (string-ascii 20),
+    late-fee: uint,
+  }
+)
+
+(define-data-var lease-counter uint u0)
+(define-data-var payment-counter uint u0)
+
+(define-public (create-lease
+    (land-id uint)
+    (tenant principal)
+    (monthly-rent uint)
+    (security-deposit uint)
+    (lease-duration-blocks uint)
+    (lease-purpose (string-ascii 30))
+  )
+  (let (
+      (land-record (unwrap! (map-get? land-records { land-id: land-id }) ERR-NOT-FOUND))
+      (lease-start-block stacks-block-height)
+      (lease-end-block (+ stacks-block-height lease-duration-blocks))
+    )
+    (asserts! (is-eq tx-sender (get owner land-record)) ERR-NOT-AUTHORIZED)
+    (asserts! (> monthly-rent u0) ERR-INVALID-PRICE)
+    (var-set lease-counter (+ (var-get lease-counter) u1))
+    (ok (map-set land-leases { lease-id: (var-get lease-counter) } {
+      land-id: land-id,
+      landlord: tx-sender,
+      tenant: tenant,
+      monthly-rent: monthly-rent,
+      security-deposit: security-deposit,
+      lease-start: lease-start-block,
+      lease-end: lease-end-block,
+      payment-due-date: (+ lease-start-block u4320),
+      last-payment-date: u0,
+      status: "active",
+      lease-purpose: lease-purpose,
+    }))
+  )
+)
+
+(define-public (make-rent-payment
+    (lease-id uint)
+    (payment-amount uint)
+  )
+  (let (
+      (lease-record (unwrap! (map-get? land-leases { lease-id: lease-id }) ERR-LEASE-NOT-FOUND))
+      (current-block stacks-block-height)
+      (is-late (> current-block (get payment-due-date lease-record)))
+      (late-fee (if is-late
+        (/ (get monthly-rent lease-record) u20)
+        u0
+      ))
+      (total-due (+ (get monthly-rent lease-record) late-fee))
+    )
+    (asserts! (is-eq tx-sender (get tenant lease-record)) ERR-NOT-AUTHORIZED)
+    (asserts! (is-eq (get status lease-record) "active") ERR-LEASE-NOT-ACTIVE)
+    (asserts! (>= payment-amount total-due) ERR-INSUFFICIENT-PAYMENT)
+    (asserts! (<= current-block (get lease-end lease-record)) ERR-LEASE-EXPIRED)
+    (var-set payment-counter (+ (var-get payment-counter) u1))
+    (map-set lease-payments {
+      lease-id: lease-id,
+      payment-id: (var-get payment-counter),
+    } {
+      amount: payment-amount,
+      payment-date: current-block,
+      payment-type: "rent",
+      late-fee: late-fee,
+    })
+    (ok (map-set land-leases { lease-id: lease-id }
+      (merge lease-record {
+        last-payment-date: current-block,
+        payment-due-date: (+ current-block u4320),
+      })
+    ))
+  )
+)
+
+(define-public (terminate-lease (lease-id uint))
+  (let ((lease-record (unwrap! (map-get? land-leases { lease-id: lease-id }) ERR-LEASE-NOT-FOUND)))
+    (asserts!
+      (or
+        (is-eq tx-sender (get landlord lease-record))
+        (is-eq tx-sender (get tenant lease-record))
+      )
+      ERR-NOT-AUTHORIZED
+    )
+    (ok (map-set land-leases { lease-id: lease-id }
+      (merge lease-record { status: "terminated" })
+    ))
+  )
+)
+
+(define-public (extend-lease
+    (lease-id uint)
+    (additional-blocks uint)
+  )
+  (let ((lease-record (unwrap! (map-get? land-leases { lease-id: lease-id }) ERR-LEASE-NOT-FOUND)))
+    (asserts! (is-eq tx-sender (get landlord lease-record)) ERR-NOT-AUTHORIZED)
+    (asserts! (is-eq (get status lease-record) "active") ERR-LEASE-NOT-ACTIVE)
+    (ok (map-set land-leases { lease-id: lease-id }
+      (merge lease-record { lease-end: (+ (get lease-end lease-record) additional-blocks) })
+    ))
+  )
+)
+
+(define-read-only (get-lease-details (lease-id uint))
+  (ok (unwrap! (map-get? land-leases { lease-id: lease-id }) ERR-LEASE-NOT-FOUND))
+)
+
+(define-read-only (get-payment-history
+    (lease-id uint)
+    (payment-id uint)
+  )
+  (ok (map-get? lease-payments {
+    lease-id: lease-id,
+    payment-id: payment-id,
+  }))
+)
+
+(define-read-only (is-lease-active (lease-id uint))
+  (match (map-get? land-leases { lease-id: lease-id })
+    lease-data (ok (and
+      (is-eq (get status lease-data) "active")
+      (<= stacks-block-height (get lease-end lease-data))
+    ))
+    (ok false)
+  )
+)
+
+(define-read-only (get-lease-count)
+  (ok (var-get lease-counter))
+)
+(define-constant ERR-PERMIT-EXISTS (err u116))
+(define-constant ERR-PERMIT-NOT-FOUND (err u117))
+(define-constant ERR-PERMIT-EXPIRED (err u118))
+(define-constant ERR-INVALID-PERMIT-TYPE (err u119))
+(define-constant ERR-UNAUTHORIZED-ISSUER (err u120))
+
+(define-map development-permits
+  { permit-id: uint }
+  {
+    land-id: uint,
+    applicant: principal,
+    permit-type: (string-ascii 30),
+    development-description: (string-ascii 200),
+    issue-date: uint,
+    expiry-date: uint,
+    issuing-authority: principal,
+    status: (string-ascii 15),
+    conditions: (string-ascii 300),
+    compliance-verified: bool,
+  }
+)
+
+(define-map permit-authorities
+  { authority: principal }
+  {
+    authorized: bool,
+    jurisdiction: (string-ascii 50),
+    permit-types: (list 5 (string-ascii 30)),
+  }
+)
+
+(define-map permit-inspections
+  {
+    permit-id: uint,
+    inspection-id: uint,
+  }
+  {
+    inspector: principal,
+    inspection-date: uint,
+    inspection-type: (string-ascii 30),
+    result: (string-ascii 15),
+    notes: (string-ascii 200),
+  }
+)
+
+(define-data-var permit-counter uint u0)
+(define-data-var inspection-counter uint u0)
+
+(define-public (authorize-permit-authority
+    (authority principal)
+    (jurisdiction (string-ascii 50))
+    (permit-types (list 5 (string-ascii 30)))
+  )
+  (begin
+    (asserts! (is-eq tx-sender (var-get registry-admin)) ERR-NOT-AUTHORIZED)
+    (ok (map-set permit-authorities { authority: authority } {
+      authorized: true,
+      jurisdiction: jurisdiction,
+      permit-types: permit-types,
+    }))
+  )
+)
+
+(define-public (apply-for-permit
+    (land-id uint)
+    (permit-type (string-ascii 30))
+    (development-description (string-ascii 200))
+    (validity-blocks uint)
+  )
+  (let (
+      (land-record (unwrap! (map-get? land-records { land-id: land-id }) ERR-NOT-FOUND))
+      (issue-date stacks-block-height)
+      (expiry-date (+ stacks-block-height validity-blocks))
+    )
+    (asserts! (is-eq tx-sender (get owner land-record)) ERR-NOT-AUTHORIZED)
+    (var-set permit-counter (+ (var-get permit-counter) u1))
+    (ok (map-set development-permits { permit-id: (var-get permit-counter) } {
+      land-id: land-id,
+      applicant: tx-sender,
+      permit-type: permit-type,
+      development-description: development-description,
+      issue-date: issue-date,
+      expiry-date: expiry-date,
+      issuing-authority: (var-get registry-admin),
+      status: "pending",
+      conditions: "",
+      compliance-verified: false,
+    }))
+  )
+)
+
+(define-public (approve-permit
+    (permit-id uint)
+    (conditions (string-ascii 300))
+  )
+  (let (
+      (permit-record (unwrap! (map-get? development-permits { permit-id: permit-id })
+        ERR-PERMIT-NOT-FOUND
+      ))
+      (authority-record (unwrap! (map-get? permit-authorities { authority: tx-sender })
+        ERR-UNAUTHORIZED-ISSUER
+      ))
+    )
+    (asserts! (get authorized authority-record) ERR-UNAUTHORIZED-ISSUER)
+    (asserts! (is-eq (get status permit-record) "pending") ERR-INVALID-STATUS)
+    (ok (map-set development-permits { permit-id: permit-id }
+      (merge permit-record {
+        status: "approved",
+        conditions: conditions,
+        issuing-authority: tx-sender,
+      })
+    ))
+  )
+)
+
+(define-public (reject-permit
+    (permit-id uint)
+    (rejection-reason (string-ascii 300))
+  )
+  (let (
+      (permit-record (unwrap! (map-get? development-permits { permit-id: permit-id })
+        ERR-PERMIT-NOT-FOUND
+      ))
+      (authority-record (unwrap! (map-get? permit-authorities { authority: tx-sender })
+        ERR-UNAUTHORIZED-ISSUER
+      ))
+    )
+    (asserts! (get authorized authority-record) ERR-UNAUTHORIZED-ISSUER)
+    (asserts! (is-eq (get status permit-record) "pending") ERR-INVALID-STATUS)
+    (ok (map-set development-permits { permit-id: permit-id }
+      (merge permit-record {
+        status: "rejected",
+        conditions: rejection-reason,
+      })
+    ))
+  )
+)
+
+(define-public (conduct-inspection
+    (permit-id uint)
+    (inspection-type (string-ascii 30))
+    (result (string-ascii 15))
+    (notes (string-ascii 200))
+  )
+  (let (
+      (permit-record (unwrap! (map-get? development-permits { permit-id: permit-id })
+        ERR-PERMIT-NOT-FOUND
+      ))
+      (authority-record (unwrap! (map-get? permit-authorities { authority: tx-sender })
+        ERR-UNAUTHORIZED-ISSUER
+      ))
+    )
+    (asserts! (get authorized authority-record) ERR-UNAUTHORIZED-ISSUER)
+    (asserts! (is-eq (get status permit-record) "approved") ERR-INVALID-STATUS)
+    (var-set inspection-counter (+ (var-get inspection-counter) u1))
+    (map-set permit-inspections {
+      permit-id: permit-id,
+      inspection-id: (var-get inspection-counter),
+    } {
+      inspector: tx-sender,
+      inspection-date: stacks-block-height,
+      inspection-type: inspection-type,
+      result: result,
+      notes: notes,
+    })
+    (if (is-eq result "passed")
+      (ok (map-set development-permits { permit-id: permit-id }
+        (merge permit-record { compliance-verified: true })
+      ))
+      (ok true)
+    )
+  )
+)
+
+(define-public (revoke-permit (permit-id uint))
+  (let (
+      (permit-record (unwrap! (map-get? development-permits { permit-id: permit-id })
+        ERR-PERMIT-NOT-FOUND
+      ))
+      (authority-record (unwrap! (map-get? permit-authorities { authority: tx-sender })
+        ERR-UNAUTHORIZED-ISSUER
+      ))
+    )
+    (asserts! (get authorized authority-record) ERR-UNAUTHORIZED-ISSUER)
+    (ok (map-set development-permits { permit-id: permit-id }
+      (merge permit-record { status: "revoked" })
+    ))
+  )
+)
+
+(define-read-only (get-permit-details (permit-id uint))
+  (ok (unwrap! (map-get? development-permits { permit-id: permit-id })
+    ERR-PERMIT-NOT-FOUND
+  ))
+)
+
+(define-read-only (get-inspection-details
+    (permit-id uint)
+    (inspection-id uint)
+  )
+  (ok (map-get? permit-inspections {
+    permit-id: permit-id,
+    inspection-id: inspection-id,
+  }))
+)
+
+(define-read-only (is-permit-valid (permit-id uint))
+  (match (map-get? development-permits { permit-id: permit-id })
+    permit-data (ok (and
+      (is-eq (get status permit-data) "approved")
+      (<= stacks-block-height (get expiry-date permit-data))
+    ))
+    (ok false)
+  )
+)
+
+(define-read-only (is-authorized-permit-authority (authority principal))
+  (ok (map-get? permit-authorities { authority: authority }))
+)
