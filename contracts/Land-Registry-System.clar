@@ -780,3 +780,255 @@
 (define-read-only (is-authorized-permit-authority (authority principal))
   (ok (map-get? permit-authorities { authority: authority }))
 )
+
+(define-constant ERR-MORTGAGE-EXISTS (err u121))
+(define-constant ERR-MORTGAGE-NOT-FOUND (err u122))
+(define-constant ERR-MORTGAGE-PAID (err u123))
+(define-constant ERR-INSUFFICIENT-COLLATERAL (err u124))
+(define-constant ERR-UNAUTHORIZED-LENDER (err u125))
+
+(define-map land-mortgages
+  { mortgage-id: uint }
+  {
+    land-id: uint,
+    borrower: principal,
+    lender: principal,
+    principal-amount: uint,
+    interest-rate: uint,
+    term-blocks: uint,
+    monthly-payment: uint,
+    start-date: uint,
+    end-date: uint,
+    outstanding-balance: uint,
+    payments-made: uint,
+    status: (string-ascii 15),
+    collateral-ratio: uint,
+  }
+)
+
+(define-map mortgage-payments
+  {
+    mortgage-id: uint,
+    payment-id: uint,
+  }
+  {
+    amount: uint,
+    principal-portion: uint,
+    interest-portion: uint,
+    payment-date: uint,
+    late-fee: uint,
+    remaining-balance: uint,
+  }
+)
+
+(define-map authorized-lenders
+  { lender: principal }
+  {
+    authorized: bool,
+    max-loan-amount: uint,
+    minimum-collateral-ratio: uint,
+  }
+)
+
+(define-data-var mortgage-counter uint u0)
+(define-data-var mortgage-payment-counter uint u0)
+
+(define-public (authorize-lender
+    (lender principal)
+    (max-loan-amount uint)
+    (minimum-collateral-ratio uint)
+  )
+  (begin
+    (asserts! (is-eq tx-sender (var-get registry-admin)) ERR-NOT-AUTHORIZED)
+    (ok (map-set authorized-lenders { lender: lender } {
+      authorized: true,
+      max-loan-amount: max-loan-amount,
+      minimum-collateral-ratio: minimum-collateral-ratio,
+    }))
+  )
+)
+
+(define-public (originate-mortgage
+    (land-id uint)
+    (borrower principal)
+    (principal-amount uint)
+    (interest-rate uint)
+    (term-blocks uint)
+    (collateral-ratio uint)
+  )
+  (let (
+      (land-record (unwrap! (map-get? land-records { land-id: land-id }) ERR-NOT-FOUND))
+      (lender-record (unwrap! (map-get? authorized-lenders { lender: tx-sender })
+        ERR-UNAUTHORIZED-LENDER
+      ))
+      (monthly-payment (/ (* principal-amount (+ u100 interest-rate)) (* term-blocks u100)))
+      (start-date stacks-block-height)
+      (end-date (+ stacks-block-height term-blocks))
+    )
+    (asserts! (get authorized lender-record) ERR-UNAUTHORIZED-LENDER)
+    (asserts! (is-eq borrower (get owner land-record)) ERR-NOT-AUTHORIZED)
+    (asserts! (<= principal-amount (get max-loan-amount lender-record))
+      ERR-INSUFFICIENT-COLLATERAL
+    )
+    (asserts! (>= collateral-ratio (get minimum-collateral-ratio lender-record))
+      ERR-INSUFFICIENT-COLLATERAL
+    )
+    (var-set mortgage-counter (+ (var-get mortgage-counter) u1))
+    (ok (map-set land-mortgages { mortgage-id: (var-get mortgage-counter) } {
+      land-id: land-id,
+      borrower: borrower,
+      lender: tx-sender,
+      principal-amount: principal-amount,
+      interest-rate: interest-rate,
+      term-blocks: term-blocks,
+      monthly-payment: monthly-payment,
+      start-date: start-date,
+      end-date: end-date,
+      outstanding-balance: principal-amount,
+      payments-made: u0,
+      status: "active",
+      collateral-ratio: collateral-ratio,
+    }))
+  )
+)
+
+(define-public (make-mortgage-payment
+    (mortgage-id uint)
+    (payment-amount uint)
+  )
+  (let (
+      (mortgage-record (unwrap! (map-get? land-mortgages { mortgage-id: mortgage-id })
+        ERR-MORTGAGE-NOT-FOUND
+      ))
+      (monthly-payment (get monthly-payment mortgage-record))
+      (outstanding-balance (get outstanding-balance mortgage-record))
+      (interest-portion (/ (* outstanding-balance (get interest-rate mortgage-record)) u1200))
+      (principal-portion (- payment-amount interest-portion))
+      (new-balance (- outstanding-balance principal-portion))
+      (is-late (> stacks-block-height
+        (+ (get start-date mortgage-record)
+          (* (+ (get payments-made mortgage-record) u1) u4320)
+        )))
+      (late-fee (if is-late
+        (/ monthly-payment u20)
+        u0
+      ))
+      (total-due (+ monthly-payment late-fee))
+    )
+    (asserts! (is-eq tx-sender (get borrower mortgage-record)) ERR-NOT-AUTHORIZED)
+    (asserts! (is-eq (get status mortgage-record) "active") ERR-INVALID-STATUS)
+    (asserts! (>= payment-amount total-due) ERR-INSUFFICIENT-PAYMENT)
+    (var-set mortgage-payment-counter (+ (var-get mortgage-payment-counter) u1))
+    (map-set mortgage-payments {
+      mortgage-id: mortgage-id,
+      payment-id: (var-get mortgage-payment-counter),
+    } {
+      amount: payment-amount,
+      principal-portion: principal-portion,
+      interest-portion: interest-portion,
+      payment-date: stacks-block-height,
+      late-fee: late-fee,
+      remaining-balance: new-balance,
+    })
+    (if (<= new-balance u0)
+      (ok (map-set land-mortgages { mortgage-id: mortgage-id }
+        (merge mortgage-record {
+          outstanding-balance: u0,
+          payments-made: (+ (get payments-made mortgage-record) u1),
+          status: "paid",
+        })
+      ))
+      (ok (map-set land-mortgages { mortgage-id: mortgage-id }
+        (merge mortgage-record {
+          outstanding-balance: new-balance,
+          payments-made: (+ (get payments-made mortgage-record) u1),
+        })
+      ))
+    )
+  )
+)
+
+(define-public (initiate-foreclosure (mortgage-id uint))
+  (let (
+      (mortgage-record (unwrap! (map-get? land-mortgages { mortgage-id: mortgage-id })
+        ERR-MORTGAGE-NOT-FOUND
+      ))
+      (expected-payments (/ (- stacks-block-height (get start-date mortgage-record)) u4320))
+      (missed-payments (- expected-payments (get payments-made mortgage-record)))
+    )
+    (asserts! (is-eq tx-sender (get lender mortgage-record)) ERR-NOT-AUTHORIZED)
+    (asserts! (is-eq (get status mortgage-record) "active") ERR-INVALID-STATUS)
+    (asserts! (>= missed-payments u3) ERR-INVALID-STATUS)
+    (ok (map-set land-mortgages { mortgage-id: mortgage-id }
+      (merge mortgage-record { status: "foreclosure" })
+    ))
+  )
+)
+
+(define-public (complete-foreclosure (mortgage-id uint))
+  (let (
+      (mortgage-record (unwrap! (map-get? land-mortgages { mortgage-id: mortgage-id })
+        ERR-MORTGAGE-NOT-FOUND
+      ))
+      (land-record (unwrap! (map-get? land-records { land-id: (get land-id mortgage-record) })
+        ERR-NOT-FOUND
+      ))
+    )
+    (asserts! (is-eq tx-sender (get lender mortgage-record)) ERR-NOT-AUTHORIZED)
+    (asserts! (is-eq (get status mortgage-record) "foreclosure")
+      ERR-INVALID-STATUS
+    )
+    (map-set land-records { land-id: (get land-id mortgage-record) }
+      (merge land-record { owner: (get lender mortgage-record) })
+    )
+    (ok (map-set land-mortgages { mortgage-id: mortgage-id }
+      (merge mortgage-record { status: "foreclosed" })
+    ))
+  )
+)
+
+(define-read-only (get-mortgage-details (mortgage-id uint))
+  (ok (unwrap! (map-get? land-mortgages { mortgage-id: mortgage-id })
+    ERR-MORTGAGE-NOT-FOUND
+  ))
+)
+
+(define-read-only (get-mortgage-payment-details
+    (mortgage-id uint)
+    (payment-id uint)
+  )
+  (ok (map-get? mortgage-payments {
+    mortgage-id: mortgage-id,
+    payment-id: payment-id,
+  }))
+)
+
+(define-read-only (is-authorized-lender (lender principal))
+  (match (map-get? authorized-lenders { lender: lender })
+    lender-data (ok (get authorized lender-data))
+    (ok false)
+  )
+)
+
+(define-read-only (get-mortgage-count)
+  (ok (var-get mortgage-counter))
+)
+
+(define-read-only (calculate-mortgage-health (mortgage-id uint))
+  (let (
+      (mortgage-record (unwrap! (map-get? land-mortgages { mortgage-id: mortgage-id })
+        ERR-MORTGAGE-NOT-FOUND
+      ))
+      (expected-payments (/ (- stacks-block-height (get start-date mortgage-record)) u4320))
+      (payment-ratio (if (> expected-payments u0)
+        (/ (* (get payments-made mortgage-record) u100) expected-payments)
+        u100
+      ))
+    )
+    (ok {
+      payment-compliance: payment-ratio,
+      outstanding-balance: (get outstanding-balance mortgage-record),
+      status: (get status mortgage-record),
+    })
+  )
+)
