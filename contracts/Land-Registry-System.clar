@@ -143,6 +143,7 @@
 (define-read-only (get-transaction-count)
   (ok (var-get transaction-counter))
 )
+
 (define-constant ERR-INVALID-PRICE (err u105))
 (define-constant ERR-UNAUTHORIZED-APPRAISER (err u106))
 
@@ -250,6 +251,7 @@
 (define-read-only (get-valuation-count)
   (ok (var-get valuation-counter))
 )
+
 (define-constant ERR-DISPUTE-EXISTS (err u107))
 (define-constant ERR-DISPUTE-NOT-FOUND (err u108))
 (define-constant ERR-INVALID-STATUS (err u109))
@@ -398,6 +400,7 @@
 (define-read-only (get-dispute-count)
   (ok (var-get dispute-counter))
 )
+
 (define-constant ERR-LEASE-EXISTS (err u111))
 (define-constant ERR-LEASE-NOT-FOUND (err u112))
 (define-constant ERR-LEASE-EXPIRED (err u113))
@@ -506,34 +509,6 @@
   )
 )
 
-(define-public (terminate-lease (lease-id uint))
-  (let ((lease-record (unwrap! (map-get? land-leases { lease-id: lease-id }) ERR-LEASE-NOT-FOUND)))
-    (asserts!
-      (or
-        (is-eq tx-sender (get landlord lease-record))
-        (is-eq tx-sender (get tenant lease-record))
-      )
-      ERR-NOT-AUTHORIZED
-    )
-    (ok (map-set land-leases { lease-id: lease-id }
-      (merge lease-record { status: "terminated" })
-    ))
-  )
-)
-
-(define-public (extend-lease
-    (lease-id uint)
-    (additional-blocks uint)
-  )
-  (let ((lease-record (unwrap! (map-get? land-leases { lease-id: lease-id }) ERR-LEASE-NOT-FOUND)))
-    (asserts! (is-eq tx-sender (get landlord lease-record)) ERR-NOT-AUTHORIZED)
-    (asserts! (is-eq (get status lease-record) "active") ERR-LEASE-NOT-ACTIVE)
-    (ok (map-set land-leases { lease-id: lease-id }
-      (merge lease-record { lease-end: (+ (get lease-end lease-record) additional-blocks) })
-    ))
-  )
-)
-
 (define-read-only (get-lease-details (lease-id uint))
   (ok (unwrap! (map-get? land-leases { lease-id: lease-id }) ERR-LEASE-NOT-FOUND))
 )
@@ -561,6 +536,7 @@
 (define-read-only (get-lease-count)
   (ok (var-get lease-counter))
 )
+
 (define-constant ERR-PERMIT-EXISTS (err u116))
 (define-constant ERR-PERMIT-NOT-FOUND (err u117))
 (define-constant ERR-PERMIT-EXPIRED (err u118))
@@ -918,6 +894,9 @@
     (asserts! (is-eq tx-sender (get borrower mortgage-record)) ERR-NOT-AUTHORIZED)
     (asserts! (is-eq (get status mortgage-record) "active") ERR-INVALID-STATUS)
     (asserts! (>= payment-amount total-due) ERR-INSUFFICIENT-PAYMENT)
+    (asserts! (<= stacks-block-height (get end-date mortgage-record))
+      ERR-LEASE-EXPIRED
+    )
     (var-set mortgage-payment-counter (+ (var-get mortgage-payment-counter) u1))
     (map-set mortgage-payments {
       mortgage-id: mortgage-id,
@@ -1030,5 +1009,97 @@
       outstanding-balance: (get outstanding-balance mortgage-record),
       status: (get status mortgage-record),
     })
+  )
+)
+
+(define-constant ERR-NO-ANALYTICS-DATA (err u126))
+
+(define-map land-analytics
+  { land-id: uint }
+  {
+    transfer-count: uint,
+    last-valuation: uint,
+    dispute-count: uint,
+    mortgage-status: (string-ascii 15),
+    performance-score: uint,
+  }
+)
+
+(define-public (update-land-analytics (land-id uint))
+  (let (
+      (land-record (unwrap! (map-get? land-records { land-id: land-id }) ERR-NOT-FOUND))
+      (has-transfer (is-some (map-get? land-history {
+        land-id: land-id,
+        transaction-id: (var-get transaction-counter),
+      })))
+      (latest-valuation (match (map-get? land-valuations {
+        land-id: land-id,
+        valuation-id: (var-get valuation-counter),
+      })
+        val-record (get market-value val-record)
+        u0
+      ))
+      (has-mortgage (is-some (map-get? land-mortgages { mortgage-id: (var-get mortgage-counter) })))
+      (mortgage-status (if has-mortgage
+        "mortgaged"
+        "clear"
+      ))
+      (performance (if (and has-transfer (> latest-valuation u0))
+        u85
+        u60
+      ))
+    )
+    (ok (map-set land-analytics { land-id: land-id } {
+      transfer-count: (if has-transfer
+        u1
+        u0
+      ),
+      last-valuation: latest-valuation,
+      dispute-count: u0,
+      mortgage-status: mortgage-status,
+      performance-score: performance,
+    }))
+  )
+)
+
+(define-read-only (get-land-analytics (land-id uint))
+  (ok (map-get? land-analytics { land-id: land-id }))
+)
+
+(define-read-only (calculate-market-summary)
+  (let (
+      (total-transfers (var-get transaction-counter))
+      (total-disputes (var-get dispute-counter))
+      (total-mortgages (var-get mortgage-counter))
+      (total-valuations (var-get valuation-counter))
+      (market-health (if (> total-transfers total-disputes)
+        u80
+        u50
+      ))
+    )
+    (ok {
+      total-transfers: total-transfers,
+      total-disputes: total-disputes,
+      total-mortgages: total-mortgages,
+      total-valuations: total-valuations,
+      market-health-score: market-health,
+      snapshot-date: stacks-block-height,
+    })
+  )
+)
+
+(define-read-only (get-land-performance (land-id uint))
+  (match (map-get? land-analytics { land-id: land-id })
+    analytics-data (match (map-get? land-records { land-id: land-id })
+      land-data (ok {
+        land-id: land-id,
+        performance-score: (get performance-score analytics-data),
+        transfer-activity: (get transfer-count analytics-data),
+        current-valuation: (get last-valuation analytics-data),
+        land-status: (get status land-data),
+      })
+      ERR-NOT-FOUND
+    )
+    ERR-NO-ANALYTICS-DATA
   )
 )
