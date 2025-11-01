@@ -1155,7 +1155,7 @@
 ;; Initialize audit categories
 (map-set audit-categories { category: "land-registration" } {
   description: "Land registration and ownership changes",
-  retention-blocks: u525600,  ;; ~1 year
+  retention-blocks: u525600, ;; ~1 year
   compliance-required: true,
 })
 
@@ -1211,14 +1211,8 @@
     (land-type (string-ascii 20))
   )
   (let ((area-str (int-to-ascii area)))
-    (log-audit-entry
-      "land-registration"
-      "land"
-      land-id
-      "New land registered in system"
-      none
-      (some land-type)
-      (list owner)
+    (log-audit-entry "land-registration" "land" land-id
+      "New land registered in system" none (some land-type) (list owner)
     )
   )
 )
@@ -1229,13 +1223,8 @@
     (previous-owner principal)
     (new-owner principal)
   )
-  (log-audit-entry
-    "land-transfer"
-    "land"
-    land-id
-    "Land ownership transferred"
-    (some "ownership-change")
-    (some "transferred")
+  (log-audit-entry "land-transfer" "land" land-id "Land ownership transferred"
+    (some "ownership-change") (some "transferred")
     (list previous-owner new-owner)
   )
 )
@@ -1249,13 +1238,7 @@
   )
   (begin
     (asserts! (is-eq tx-sender (var-get registry-admin)) ERR-NOT-AUTHORIZED)
-    (log-audit-entry
-      action-type
-      target-entity
-      entity-id
-      details
-      none
-      none
+    (log-audit-entry action-type target-entity entity-id details none none
       (list (var-get registry-admin))
     )
   )
@@ -1269,14 +1252,8 @@
     (respondent principal)
     (details (string-ascii 200))
   )
-  (log-audit-entry
-    "dispute-action"
-    "dispute"
-    dispute-id
-    details
-    none
-    (some action)
-    (list complainant respondent)
+  (log-audit-entry "dispute-action" "dispute" dispute-id details none
+    (some action) (list complainant respondent)
   )
 )
 
@@ -1289,14 +1266,8 @@
     (details (string-ascii 200))
   )
   (let ((amount-str (int-to-ascii amount)))
-    (log-audit-entry
-      transaction-type
-      "financial"
-      entity-id
-      details
-      none
-      (some "completed")
-      parties
+    (log-audit-entry transaction-type "financial" entity-id details none
+      (some "completed") parties
     )
   )
 )
@@ -1310,7 +1281,10 @@
       (transfer-actions u0)
       (dispute-actions u0)
       (financial-actions u0)
-      (compliance-score (if (> total-audits u0) u95 u0))
+      (compliance-score (if (> total-audits u0)
+        u95
+        u0
+      ))
     )
     (asserts! (is-eq tx-sender (var-get registry-admin)) ERR-NOT-AUTHORIZED)
     (var-set last-summary-date current-date)
@@ -1327,9 +1301,7 @@
 
 ;; Get audit entry by ID
 (define-read-only (get-audit-entry (audit-id uint))
-  (ok (unwrap! (map-get? audit-trail { audit-id: audit-id })
-    ERR-AUDIT-NOT-FOUND
-  ))
+  (ok (unwrap! (map-get? audit-trail { audit-id: audit-id }) ERR-AUDIT-NOT-FOUND))
 )
 
 ;; Get audit entries for specific entity
@@ -1339,7 +1311,10 @@
   )
   ;; Simplified implementation - in production, this would filter results
   (ok (list
-    { audit-id: u1, found: true }
+    {
+      audit-id: u1,
+      found: true,
+    }
   ))
 )
 
@@ -1364,7 +1339,10 @@
 )
 
 ;; Verify audit integrity (simplified)
-(define-read-only (verify-audit-integrity (start-audit-id uint) (end-audit-id uint))
+(define-read-only (verify-audit-integrity
+    (start-audit-id uint)
+    (end-audit-id uint)
+  )
   (let (
       (start-exists (is-some (map-get? audit-trail { audit-id: start-audit-id })))
       (end-exists (is-some (map-get? audit-trail { audit-id: end-audit-id })))
@@ -1374,7 +1352,14 @@
       range-valid: range-valid,
       start-exists: start-exists,
       end-exists: end-exists,
-      integrity-score: (if (and range-valid start-exists end-exists) u100 u0),
+      integrity-score: (if (and
+          range-valid
+          start-exists
+          end-exists
+        )
+        u100
+        u0
+      ),
     })
   )
 )
